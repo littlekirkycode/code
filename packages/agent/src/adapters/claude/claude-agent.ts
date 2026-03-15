@@ -44,6 +44,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { v7 as uuidv7 } from "uuid";
 import packageJson from "../../../package.json" with { type: "json" };
+import { fetchGatewayModels } from "../../gateway-models";
 import { unreachable, withTimeout } from "../../utils/common";
 import { Logger } from "../../utils/logger";
 import { Pushable } from "../../utils/streams";
@@ -275,7 +276,11 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
     this.session.promptRunning = true;
     let handedOff = false;
     let lastAssistantTotalUsage: number | null = null;
-    let lastContextWindowSize = 200000;
+    // Resolve context window from gateway models for the active model
+    const modelId = this.session.modelId;
+    const gatewayModels = modelId ? await fetchGatewayModels() : [];
+    const matchedModel = gatewayModels.find((m) => m.id === modelId);
+    let lastContextWindowSize = matchedModel?.context_window ?? 200_000;
 
     const supportsTerminalOutput =
       (
