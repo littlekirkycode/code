@@ -276,8 +276,10 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
     this.session.promptRunning = true;
     let handedOff = false;
     let lastAssistantTotalUsage: number | null = null;
-    // Use session-persisted context window if available (SDK-reported values
-    // are authoritative). Only fall back to gateway models on first prompt.
+    // Context window size: prefer the SDK-reported value persisted from a
+    // previous result message. Gateway-seeded values may be stale (e.g. 200K
+    // when the SDK knows the real limit is 1M), so we suppress live streaming
+    // broadcasts until the SDK has confirmed the value via a result message.
     if (this.session.lastContextWindowSize == null) {
       const modelId = this.session.modelId;
       const gatewayModels = modelId ? await fetchGatewayModels() : [];
@@ -285,7 +287,8 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
       this.session.lastContextWindowSize =
         matchedModel?.context_window ?? 200_000;
     }
-    let lastContextWindowSize = this.session.lastContextWindowSize;
+    let lastContextWindowSize = this.session.lastContextWindowSize ?? 200_000;
+    let contextWindowConfirmed = this.session.contextWindowConfirmed === true;
 
     const supportsTerminalOutput =
       (
@@ -353,6 +356,8 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
                 : lastContextWindowSize;
             // Persist SDK-reported value so it survives across prompt() calls
             this.session.lastContextWindowSize = lastContextWindowSize;
+            this.session.contextWindowConfirmed = true;
+            contextWindowConfirmed = true;
 
             // Send usage_update notification
             if (lastAssistantTotalUsage !== null) {
@@ -452,16 +457,20 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
                 usage.cache_read_input_tokens +
                 usage.cache_creation_input_tokens;
 
-              // Broadcast live usage update so the UI indicator updates during streaming
-              await this.client.sessionUpdate({
-                sessionId: params.sessionId,
-                update: {
-                  sessionUpdate: "usage_update",
-                  used: lastAssistantTotalUsage,
-                  size: lastContextWindowSize,
-                  cost: null,
-                },
-              });
+              // Broadcast live usage update during streaming, but only once the
+              // context window size has been confirmed by an SDK result message.
+              // Before that, the gateway-seeded value may be stale/wrong.
+              if (contextWindowConfirmed) {
+                await this.client.sessionUpdate({
+                  sessionId: params.sessionId,
+                  update: {
+                    sessionUpdate: "usage_update",
+                    used: lastAssistantTotalUsage,
+                    size: lastContextWindowSize,
+                    cost: null,
+                  },
+                });
+              }
             }
 
             const result = await handleUserAssistantMessage(message, context);

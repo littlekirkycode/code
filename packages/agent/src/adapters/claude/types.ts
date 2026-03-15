@@ -55,6 +55,8 @@ export type Session = BaseSession & {
   accumulatedUsage: AccumulatedUsage;
   /** Persists across prompt() calls so SDK-reported values survive turn boundaries */
   lastContextWindowSize?: number;
+  /** True once the SDK has reported contextWindow via modelUsage in a result message */
+  contextWindowConfirmed?: boolean;
   promptRunning: boolean;
   pendingMessages: Map<string, PendingMessage>;
   nextPendingOrder: number;
