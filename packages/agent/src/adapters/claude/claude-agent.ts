@@ -276,11 +276,16 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
     this.session.promptRunning = true;
     let handedOff = false;
     let lastAssistantTotalUsage: number | null = null;
-    // Resolve context window from gateway models for the active model
-    const modelId = this.session.modelId;
-    const gatewayModels = modelId ? await fetchGatewayModels() : [];
-    const matchedModel = gatewayModels.find((m) => m.id === modelId);
-    let lastContextWindowSize = matchedModel?.context_window ?? 200_000;
+    // Use session-persisted context window if available (SDK-reported values
+    // are authoritative). Only fall back to gateway models on first prompt.
+    if (this.session.lastContextWindowSize == null) {
+      const modelId = this.session.modelId;
+      const gatewayModels = modelId ? await fetchGatewayModels() : [];
+      const matchedModel = gatewayModels.find((m) => m.id === modelId);
+      this.session.lastContextWindowSize =
+        matchedModel?.context_window ?? 200_000;
+    }
+    let lastContextWindowSize = this.session.lastContextWindowSize;
 
     const supportsTerminalOutput =
       (
@@ -346,6 +351,8 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
               contextWindows.length > 0
                 ? Math.min(...contextWindows)
                 : lastContextWindowSize;
+            // Persist SDK-reported value so it survives across prompt() calls
+            this.session.lastContextWindowSize = lastContextWindowSize;
 
             // Send usage_update notification
             if (lastAssistantTotalUsage !== null) {
@@ -789,6 +796,13 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
     const modelOptions = await this.getModelConfigOptions();
     const resolvedModelId = settingsModel || modelOptions.currentModelId;
     session.modelId = resolvedModelId;
+
+    // Seed context window size from gateway so it's available before first result
+    const gatewayModels = await fetchGatewayModels();
+    const matchedModel = gatewayModels.find((m) => m.id === resolvedModelId);
+    if (matchedModel) {
+      session.lastContextWindowSize = matchedModel.context_window;
+    }
 
     if (!isResume) {
       const resolvedSdkModel = toSdkModelId(resolvedModelId);
