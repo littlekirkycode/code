@@ -44,7 +44,6 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { v7 as uuidv7 } from "uuid";
 import packageJson from "../../../package.json" with { type: "json" };
-import { fetchGatewayModels } from "../../gateway-models";
 import { unreachable, withTimeout } from "../../utils/common";
 import { Logger } from "../../utils/logger";
 import { Pushable } from "../../utils/streams";
@@ -60,7 +59,11 @@ import { fetchMcpToolMetadata } from "./mcp/tool-metadata";
 import { canUseTool } from "./permissions/permission-handlers";
 import { getAvailableSlashCommands } from "./session/commands";
 import { parseMcpServers } from "./session/mcp-config";
-import { DEFAULT_MODEL, toSdkModelId } from "./session/models";
+import {
+  DEFAULT_MODEL,
+  getDefaultContextWindow,
+  toSdkModelId,
+} from "./session/models";
 import {
   buildSessionOptions,
   buildSystemPrompt,
@@ -276,19 +279,13 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
     this.session.promptRunning = true;
     let handedOff = false;
     let lastAssistantTotalUsage: number | null = null;
-    // Context window size: prefer the SDK-reported value persisted from a
-    // previous result message. Gateway-seeded values may be stale (e.g. 200K
-    // when the SDK knows the real limit is 1M), so we suppress live streaming
-    // broadcasts until the SDK has confirmed the value via a result message.
+    // Context window size: use model-aware default, refined by SDK result messages.
     if (this.session.lastContextWindowSize == null) {
-      const modelId = this.session.modelId;
-      const gatewayModels = modelId ? await fetchGatewayModels() : [];
-      const matchedModel = gatewayModels.find((m) => m.id === modelId);
-      this.session.lastContextWindowSize =
-        matchedModel?.context_window ?? 200_000;
+      this.session.lastContextWindowSize = getDefaultContextWindow(
+        this.session.modelId ?? "",
+      );
     }
-    let lastContextWindowSize = this.session.lastContextWindowSize ?? 200_000;
-    let contextWindowConfirmed = this.session.contextWindowConfirmed === true;
+    let lastContextWindowSize = this.session.lastContextWindowSize;
 
     const supportsTerminalOutput =
       (
@@ -353,11 +350,9 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
             lastContextWindowSize =
               contextWindows.length > 0
                 ? Math.min(...contextWindows)
-                : lastContextWindowSize;
+                : getDefaultContextWindow(this.session.modelId ?? "");
             // Persist SDK-reported value so it survives across prompt() calls
             this.session.lastContextWindowSize = lastContextWindowSize;
-            this.session.contextWindowConfirmed = true;
-            contextWindowConfirmed = true;
 
             // Send usage_update notification
             if (lastAssistantTotalUsage !== null) {
@@ -457,20 +452,16 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
                 usage.cache_read_input_tokens +
                 usage.cache_creation_input_tokens;
 
-              // Broadcast live usage update during streaming, but only once the
-              // context window size has been confirmed by an SDK result message.
-              // Before that, the gateway-seeded value may be stale/wrong.
-              if (contextWindowConfirmed) {
-                await this.client.sessionUpdate({
-                  sessionId: params.sessionId,
-                  update: {
-                    sessionUpdate: "usage_update",
-                    used: lastAssistantTotalUsage,
-                    size: lastContextWindowSize,
-                    cost: null,
-                  },
-                });
-              }
+              // Broadcast live usage update during streaming
+              await this.client.sessionUpdate({
+                sessionId: params.sessionId,
+                update: {
+                  sessionUpdate: "usage_update",
+                  used: lastAssistantTotalUsage,
+                  size: lastContextWindowSize,
+                  cost: null,
+                },
+              });
             }
 
             const result = await handleUserAssistantMessage(message, context);
@@ -544,6 +535,10 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
     const sdkModelId = toSdkModelId(params.modelId);
     await this.session.query.setModel(sdkModelId);
     this.session.modelId = params.modelId;
+    // Reset context window to new model's default
+    this.session.lastContextWindowSize = getDefaultContextWindow(
+      params.modelId,
+    );
     await this.updateConfigOption("model", params.modelId);
     return {};
   }
@@ -594,6 +589,10 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
       const sdkModelId = toSdkModelId(params.value);
       await this.session.query.setModel(sdkModelId);
       this.session.modelId = params.value;
+      // Reset context window to new model's default
+      this.session.lastContextWindowSize = getDefaultContextWindow(
+        params.value,
+      );
     } else if (params.configId === "effort") {
       const newEffort = params.value as EffortLevel;
       this.session.effort = newEffort;
@@ -806,12 +805,8 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
     const resolvedModelId = settingsModel || modelOptions.currentModelId;
     session.modelId = resolvedModelId;
 
-    // Seed context window size from gateway so it's available before first result
-    const gatewayModels = await fetchGatewayModels();
-    const matchedModel = gatewayModels.find((m) => m.id === resolvedModelId);
-    if (matchedModel) {
-      session.lastContextWindowSize = matchedModel.context_window;
-    }
+    // Seed context window size from model-aware default
+    session.lastContextWindowSize = getDefaultContextWindow(resolvedModelId);
 
     if (!isResume) {
       const resolvedSdkModel = toSdkModelId(resolvedModelId);
