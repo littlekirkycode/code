@@ -275,6 +275,7 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
     this.session.promptRunning = true;
     let handedOff = false;
     let lastAssistantTotalUsage: number | null = null;
+    let lastContextWindowSize = 200000;
 
     const supportsTerminalOutput =
       (
@@ -336,8 +337,10 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
             const contextWindows = Object.values(message.modelUsage).map(
               (m) => m.contextWindow,
             );
-            const contextWindowSize =
-              contextWindows.length > 0 ? Math.min(...contextWindows) : 200000;
+            lastContextWindowSize =
+              contextWindows.length > 0
+                ? Math.min(...contextWindows)
+                : lastContextWindowSize;
 
             // Send usage_update notification
             if (lastAssistantTotalUsage !== null) {
@@ -346,7 +349,7 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
                 update: {
                   sessionUpdate: "usage_update",
                   used: lastAssistantTotalUsage,
-                  size: contextWindowSize,
+                  size: lastContextWindowSize,
                   cost: {
                     amount: message.total_cost_usd,
                     currency: "USD",
@@ -436,6 +439,17 @@ export class ClaudeAcpAgent extends BaseAcpAgent {
                 usage.output_tokens +
                 usage.cache_read_input_tokens +
                 usage.cache_creation_input_tokens;
+
+              // Broadcast live usage update so the UI indicator updates during streaming
+              await this.client.sessionUpdate({
+                sessionId: params.sessionId,
+                update: {
+                  sessionUpdate: "usage_update",
+                  used: lastAssistantTotalUsage,
+                  size: lastContextWindowSize,
+                  cost: null,
+                },
+              });
             }
 
             const result = await handleUserAssistantMessage(message, context);
